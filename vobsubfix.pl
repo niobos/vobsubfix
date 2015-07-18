@@ -75,7 +75,7 @@ while(1) {
 
 			if( $spu_len == 0 && $length_remaining == 0 ) {
 				# empty SPU, switch streamid to padding
-				$substreamid = 0xbe;
+				$streamid = 0xbe;
 				print pack "a*Cna*Cn", $sync, $streamid, $length, $extensions, $substreamid, $spu_len; # $remaining_pes_data is empty
 				printf STDERR "\@0x%08x : 0-length SPU, change to padding\n", tell($fh);
 			} else {
