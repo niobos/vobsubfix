@@ -1,0 +1,173 @@
+<html><head>
+<meta http-equiv="content-type" content="text/html; charset=windows-1252">
+<title>Sub-Pictures</title>
+</head>
+
+<body background="Sub-Pictures_files/dvdbg.gif" bgcolor="f0f0ff">
+
+<h1>Sub-Pictures</h1>
+The typical arrangement of data in the 53220 byte buffer for sub-pictures is
+<table border="1">
+<tbody><tr><th>SPUH</th><th>PXDtf</th><th>PXDbf</th><th>SP_DCSQT</th></tr>
+</tbody></table>
+However, the only requirement is that the header (SPUH) be first, all other areas are
+reached by pointers.
+
+<h4>SPUH</h4>
+Sub-Picture Unit Header
+<br>2 words (least significant byte last)
+<table>
+<tbody><tr><th>offset</th><th>name</th><th>contents</th></tr>
+<tr><th>0</th><td>SPDSZ</td><td>the size of the total sub-picture data (which may span packets)</td></tr>
+<tr><th>2</th><td>SP_DCSQTA</td><td>offset within the Sub-Picture Unit to the SP_DCSQT</td></tr>
+</tbody></table>
+
+<a name="pxd"><h4>PXDtf and PXDbf</h4>
+PiXel Data
+<br>These are the rle compressed pixel data for the top field (lines 1, 3, 5, etc) and the
+bottom field (lines 2, 4, 6, etc) respectively
+<br>Individual pixels may have one of four values, commonly referred to as <i>background</i>
+(0), <i>pattern</i> (1), <i>emphasis 1</i> (2), and <i>emphasis 2</i> (3)
+Each coded value indicates the <i>number</i> of pixels having the same <i>code value</i>,
+and can be in one of four forms, depending on the number of identical pixels
+<table>
+<tbody><tr><th>range</th><th>bits</th><th>format</th></tr>
+<tr><td>1-3</td><td>4</td><td>n n c c</td></tr>
+<tr><td>4-15</td><td>8</td><td>0 0 n n n n c c</td></tr>
+<tr><td>16-63</td><td>12</td><td>0 0 0 0 n n n n n n c c</td></tr>
+<tr><td>64-255</td><td>16</td><td>0 0 0 0 0 0 n n n n n n n n c c</td></tr>
+</tbody></table>
+One special case, encoding a count of zero using the 16-bit format indicates the same pixel
+value until the end of the line.
+<br>If, at the end of a line, the bit count is not a multiple of 8, four fill bits of 0 are added.
+
+</a><a name="dcsq"><h4>SP_DCSQT</h4>
+Sub-Picture Display Control SeQuence Table
+<br>This area contains blocks (SP_DCSQ) of commands to the decoder. Each SP_DCSQ begins with a 2 word
+header
+<table>
+<tbody><tr><th>offset</th><th>name</th><th>contents</th></tr>
+<tr><th>0</th><td>SP_DCSQ_STM</td><td>delay to wait before executing these commands.
+	<br>The units are 90KHz clock (same as PTM) divided by 1024 - see <a href="#delay">conversion aids</a></td></tr>
+<tr><th>2</th><td>SP_NXT_DCSQ_SA</td><td>offset within the Sub-Picture Unit to the next SP_DCSQ.
+	If this is the last SP_DCSQ, it points to itself.</td></tr>
+</tbody></table>
+
+</a><a name="cmds"><h4>Commands</h4>
+There are eight commands available for Sub-Pictures. The first SP_DCSQ should contain, as a minimum,
+SET_COLOR, SET_CONTR, SET_DAREA, and SET_DSPXA.
+
+</a><a name="cmdend"></a><p><a name="cmdend">FF - CMD_END - ends one SP_DCSQ
+</a><a name="fstadsp"></a></p><p><a name="fstadsp">00 - FSTA_DSP - Forced Start Display, no arguments
+</a><a name="stadsp"></a></p><p><a name="stadsp">01 - STA_DSP - Start Display, no arguments
+</a><a name="stpdsp"></a></p><p><a name="stpdsp">02 - STP_DSP - Stop Display, no arguments
+</a><a name="setcol"></a></p><p><a name="setcol">03 - SET_COLOR - provides four indices into the CLUT for the current PGC to associate with
+	the four pixel values. One nibble per pixel value for a total of 2 bytes.
+	<br>e2 e1 &nbsp; p b
+</a><a name="setcon"></a></p><p><a name="setcon">04 - SET_CONTR - directly provides the four contrast (alpha blend) values to associate with
+	the four pixel values. One nibble per pixel value for a total of 2 bytes.
+	0x0 = transparent, 0xF = opaque
+	<br>e2 e1 &nbsp; p b
+</a><a name="setdarea"></a></p><p><a name="setdarea">05 - SET_DAREA - defines the display area, each pair (X and Y) of values is 3 bytes wide, for
+	a total of 6 bytes, and has the form
+	<br>sx sx &nbsp; sx ex &nbsp; ex ex &nbsp; sy sy &nbsp; sy ey &nbsp; ey ey
+	<br>sx = starting X coordinate
+	<br>ex = ending X coordinate
+	<br>sy = starting Y coordinate
+	<br>ey = ending Y coordinate
+</a><a name="setdspxa"></a></p><p><a name="setdspxa">06 - SET_DSPXA - defines the pixel data addresses. First a 2-byte offset to the top field
+	data, followed by a 2-byte offset to the bottom field data, for a total of 4 bytes.
+</a><a name="chgcolcon"></a></p><p><a name="chgcolcon">07 - CHG_COLCON - allows for changing the COLor and CONtrast within one or more areas of
+	the display. This command contains a series of parameters, arranged in a hierarchy.
+<br>Following the command byte is a 2-byte value for the total size of the parameter area,
+including the size word.
+<br>The parameter sequence begins with a LN_CTLI, which defines a vertically bounded area of
+the display. The LN_CTLI may include from one to eight PX_CTLI parameters, which define a
+starting horizontal position and new color and contrast value to apply from that column on towards
+the right to the next PX_CTLI or the right side of the display.
+</a></p><p><a name="chgcolcon">LN_CTLI, 4 bytes, special value of 0f ff 
+ff ff signifies the end of the parameter area (this termination code 
+MUST be present as the last parameter)
+<br>0 s &nbsp; s s &nbsp; n t &nbsp; t t
+<br>sss = csln, the starting (top-most) line number for this area (must be &gt; previous LN_CTLI ttt)
+<br>n = number_of_changes - number of PX_CTLI to follow (1 to 8)
+<br>ttt = ctln, the terminating (bottom-most) line number for this area (must be &gt;= sss)
+</a></p><p><a name="chgcolcon">PX_CTLI, 6 bytes, defines a starting column and new color and contrast values
+<br>bytes 0 and 1 - starting column number (must be 8 or more greater than the previous PX_CTLI)
+<br>bytes 2 and 3 - new color values, as per SET_COLOR
+<br>bytes 4 and 5 - new contrast values, as per SET_CONTR
+
+</a><a name="delay">
+</a></p><h4><a name="delay">Converting frames and time to SP_DCSQ_STM values</a></h4><a name="delay">
+The direct method of converting time to delay values is to multiply time in seconds by 90000/1024
+and truncate the value. Rounding up will cause the display to occur one frame late.
+<table>
+<tbody><tr><td>
+<table border="1">
+<tbody><tr><th>Frames</th><th>value for NTSC (30fps)</th><th>value for PAL/SECAM (25fps)</th></tr>
+<tr><td>1</td><td>2</td><td>3</td></tr>
+<tr><td>2</td><td>5</td><td>7</td></tr>
+<tr><td>3</td><td>8</td><td>10</td></tr>
+<tr><td>4</td><td>11</td><td>14</td></tr>
+<tr><td>5</td><td>14</td><td>17</td></tr>
+<tr><td>6</td><td>17</td><td>21</td></tr>
+<tr><td>7</td><td>20</td><td>24</td></tr>
+<tr><td>8</td><td>23</td><td>28</td></tr>
+<tr><td>9</td><td>26</td><td>31</td></tr>
+<tr><td>10</td><td>29</td><td>35</td></tr>
+<tr><td>11</td><td>32</td><td>38</td></tr>
+<tr><td>12</td><td>35</td><td>42</td></tr>
+<tr><td>13</td><td>38</td><td>45</td></tr>
+<tr><td>14</td><td>41</td><td>49</td></tr>
+<tr><td>15</td><td>43</td><td>52</td></tr>
+<tr><td>16</td><td>46</td><td>56</td></tr>
+<tr><td>17</td><td>49</td><td>59</td></tr>
+<tr><td>18</td><td>52</td><td>63</td></tr>
+<tr><td>19</td><td>55</td><td>66</td></tr>
+<tr><td>20</td><td>58</td><td>70</td></tr>
+<tr><td>21</td><td>61</td><td>73</td></tr>
+<tr><td>22</td><td>64</td><td>77</td></tr>
+<tr><td>23</td><td>67</td><td>80</td></tr>
+<tr><td>24</td><td>70</td><td>84</td></tr>
+<tr><td>25</td><td>73</td><td>(87)</td></tr>
+<tr><td>26</td><td>76</td><td>(91)</td></tr>
+<tr><td>27</td><td>79</td><td>(94)</td></tr>
+<tr><td>28</td><td>82</td><td>(98)</td></tr>
+<tr><td>29</td><td>84</td><td>(101)</td></tr>
+</tbody></table>
+</td><td valign="top">
+<table border="1">
+<tbody><tr><th>seconds</th><th>value</th></tr>
+<tr><td>1</td><td>87</td></tr>
+<tr><td>2</td><td>175</td></tr>
+<tr><td>3</td><td>263</td></tr>
+<tr><td>4</td><td>351</td></tr>
+<tr><td>5</td><td>439</td></tr>
+<tr><td>6</td><td>527</td></tr>
+<tr><td>7</td><td>615</td></tr>
+<tr><td>8</td><td>703</td></tr>
+<tr><td>9</td><td>791</td></tr>
+<tr><td>10</td><td>878</td></tr>
+<tr><td>20</td><td>1757</td></tr>
+<tr><td>30</td><td>2636</td></tr>
+<tr><td>40</td><td>3515</td></tr>
+<tr><td>50</td><td>4394</td></tr>
+<tr><td>60</td><td>5273</td></tr>
+</tbody></table>
+</td></tr>
+</tbody></table>
+
+<table border="0" width="100%">
+<tbody><tr><td align="left"><a href="http://www.mpucoder.com/DVD/index.html"><img src="Sub-Pictures_files/dvd-sm.gif">DVD-Video</a> info home</td>
+    <td align="right">Copyright © 2001 - 2015 <a href="http://www.mpucoder.com/entity.html">MPUCoder</a>, all rights reserved.</td>
+</tr></tbody></table>
+
+<script language="javascript"><!-- Hide from old browsers
+	if (self != top) {
+		top.location.href = self.location.href
+	}
+	// Stop hiding from old browsers -->
+</script>
+
+
+</a></body></html>
