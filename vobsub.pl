@@ -112,6 +112,7 @@ sub hexdump ($) {
 
 					if( $extensions->{"PTS present"} ) {
 						$self->{"last PTS"} = $extensions->{"PTS"}->{"PTS"};
+						printf STDERR "\@0x%x PES header PTS: %f\n", $self->{source}->tell, $extensions->{"PTS"}->{"PTS"} if $self->{debug};
 					}
 
 					my $substreamid = ::Byte("substream ID")->parse($self->{source});
@@ -186,98 +187,85 @@ my $s_file = CreateStreamReader(File => $fh);
 my $s_pesdata = DS::PES->new($s_file);
 
 while(1) {
+	my $startpos = $s_pesdata->tell;
 	my $length = UBInt16("length")->parse($s_pesdata);
-	next if $length == 0;
-
-	my $data_end = UBInt16("data end")->parse($s_pesdata) + 2;
-	if( $data_end > $length ) {
-		printf STDERR "%s SPU: data_end (0x%04x) larger than total length (0x%04x)\n", $s_pesdata->vtell, $data_end, $length;
+	if( $length == 0 ) {
+		printf "%s (%f) : empty SPU\n", $s_pesdata->vtell, $s_pesdata->{"last PTS"};
+		next;
 	}
 
-	my $data = Bytes("data", $data_end - 4)->parse($s_pesdata);
-
-	my $control_end = UBInt16("control end")->parse($s_pesdata);
-	if( $control_end <= $data_end ) {
-		printf STDERR "%s SPU: control_end (0x%04x) smaller than data_end (0x%04x)\n", $s_pesdata->vtell, $control_end, $data_end;
-	} elsif( $control_end > $length ) {
-		printf STDERR "%s SPU: control_end (0x%04x) larger than total length (0x%04x)\n", $s_pesdata->vtell, $control_end, $length;
+	my $next_control_start = UBInt16("control start")->parse($s_pesdata);
+	if( $next_control_start > $length ) {
+		printf STDERR "%s SPU: next_control_start (0x%04x) larger than total length (0x%04x)\n", $s_pesdata->vtell, $next_control_start, $length;
 	}
 
-	my $control = Bytes("control", $control_end - $data_end - 2)->parse($s_pesdata);
+	my $data = Bytes("data", $next_control_start - 4)->parse($s_pesdata);
 
-	my $duration = UBInt16("duration")->parse($s_pesdata);
-	my $control_end2 = UBInt16("control end")->parse($s_pesdata);
-	if( $control_end != $control_end2 ) {
-		printf STDERR "%s SPU: control_end (0x%04x) != control_end2 (0x%04x)\n", $s_pesdata->vtell, $control_end, $control_end2;
-	}
-
-	{
-		my $two = Byte("0x02")->parse($s_pesdata);
-		if( $two != 0x02 ) {
-			printf STDERR "%s SPU: end sequence (0x%02x) != 0x02\n", $s_pesdata->vtell, $two;
+	my $control_start;
+	do {
+		$control_start = $next_control_start;
+		my $delay = UBInt16("delay")->parse($s_pesdata);
+		$next_control_start = UBInt16("control start")->parse($s_pesdata);
+		if( $next_control_start > $length ) {
+			printf STDERR "%s SPU: next_control_start (0x%04x) larger than total length (0x%04x)\n", $s_pesdata->vtell, $next_control_start, $length;
 		}
-		my $ff = Byte("0x02")->parse($s_pesdata);
-		if( $ff != 0xff ) {
-			printf STDERR "%s SPU: end sequence (0x%02x) != 0xff\n", $s_pesdata->vtell, $ff;
-		}
-		if( $control_end % 2 ) {
-			$ff = Byte("0x02")->parse($s_pesdata);
-			if( $ff != 0xff ) {
-				printf STDERR "%s SPU: end sequence (0x%02x) != 0xff\n", $s_pesdata->vtell, $ff;
+
+		printf "%s %f : ", $s_pesdata->vtell, $s_pesdata->{"last PTS"} + ($delay<<10)/90000.;
+
+		while(1) {
+			my $cmd = Byte("command")->parse($s_pesdata);
+			if( $cmd == 0x00 ) {
+				printf "<force> ";
+
+			} elsif( $cmd == 0x01 ) {
+				printf "<start> ";
+
+			} elsif( $cmd == 0x02 ) {
+				printf "<stop> ";
+
+			} elsif( $cmd == 0x03 ) {
+				my $palette = Bytes("palette", 2)->parse($s_pesdata);
+				my @palette = map { hex($_) } split //, unpack "H4", $palette;
+				printf "<palette %s> ", join(' ', @palette);
+
+			} elsif( $cmd == 0x04 ) {
+				my $palette = Bytes("palette", 2)->parse($s_pesdata);
+				my @palette = map { hex($_) } split //, unpack "H4", $palette;
+				printf "<alpha %s> ", join(' ', @palette);
+
+			} elsif( $cmd == 0x05 ) {
+				my $coords = Bytes("coords", 6)->parse($s_pesdata);
+				$coords = BitStruct("coords",
+						BitField("c1", 12),
+						BitField("cl", 12),
+						BitField("r1", 12),
+						BitField("rl", 12),
+					)->parse($coords);
+				printf "<coords c[%d;%d] r[%d;%d]> ", $coords->{c1}, $coords->{cl},
+													  $coords->{r1}, $coords->{rl};
+
+			} elsif( $cmd == 0x06 ) {
+				my $coords = Bytes("coords", 4)->parse($s_pesdata);
+				$coords = Struct("coords",
+						UBInt16("1st"),
+						UBInt16("2nd"),
+					)->parse($coords);
+				printf "<pos %d %d> ", $coords->{"1st"}, $coords->{"2nd"};
+
+			} elsif( $cmd == 0xff ) {
+				printf "<end> ";
+				last;
+
+			} else {
+				printf "<0x%02x ?", $cmd;
+				last;
 			}
 		}
-	}
 
-	printf "%s %f --> %f : ", $s_pesdata->vtell, $s_pesdata->{"last PTS"},
-	                          $s_pesdata->{"last PTS"} + ($duration<<10)/90000.;
+		print "\n";
 
-	while( length($control) ) {
-		my $cmd = ord( substr $control, 0, 1, '' );
-		if( $cmd == 0x00 ) {
-			printf "<force> ";
+	} while( $next_control_start != $control_start );
 
-		} elsif( $cmd == 0x01 ) {
-			printf "<start> ";
-
-		} elsif( $cmd == 0x02 ) {
-			printf "<stop> ";
-
-		} elsif( $cmd == 0x03 ) {
-			my $palette = substr $control, 0, 2, '';
-			my @palette = map { hex($_) } split //, unpack "H4", $palette;
-			printf "<palette %s> ", join(' ', @palette);
-
-		} elsif( $cmd == 0x04 ) {
-			my $palette = substr $control, 0, 2, '';
-			my @palette = map { hex($_) } split //, unpack "H4", $palette;
-			printf "<alpha %s> ", join(' ', @palette);
-
-		} elsif( $cmd == 0x05 ) {
-			my $coords = substr $control, 0, 6, '';
-			$coords = BitStruct("coords",
-					BitField("c1", 12),
-					BitField("cl", 12),
-					BitField("r1", 12),
-					BitField("rl", 12),
-				)->parse($coords);
-			printf "<coords c[%d;%d] r[%d;%d]> ", $coords->{c1}, $coords->{cl},
-			                                      $coords->{r1}, $coords->{rl};
-
-		} elsif( $cmd == 0x06 ) {
-			my $coords = substr $control, 0, 4, '';
-			$coords = Struct("coords",
-					UBInt16("1st"),
-					UBInt16("2nd"),
-				)->parse($coords);
-			printf "<pos %d %d> ", $coords->{"1st"}, $coords->{"2nd"};
-
-		} elsif( $cmd == 0xff ) {
-			printf "<end> ";
-
-		} else {
-			printf "<0x%02x ?", $cmd;
-			last;
-		}
-	}
-	print "\n";
+	my $pad_len = $startpos+$length - $s_pesdata->tell;
+	Bytes("padding", $pad_len)->parse($s_pesdata);
 }
