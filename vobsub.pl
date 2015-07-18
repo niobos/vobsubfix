@@ -26,6 +26,8 @@ sub hexdump ($) {
 			source => $source,
 			pos => 0,
 			datalen => undef,
+
+			last_pts => undef,
 		};
 		return bless $self, $class;
 	}
@@ -56,7 +58,6 @@ sub hexdump ($) {
 				} elsif( $streamid == 0xbd ) {
 					my $length = ::UBInt16("")->parse($self->{source});
 					my $pos = $self->{source}->tell;
-					$self->{pos} = 0;
 					my $extensions = ::BitStruct("extensions",
 							::Const( ::BitField("magic", 2), 2),
 							::BitField("PES scrambling code", 2),
@@ -84,6 +85,10 @@ sub hexdump ($) {
 								::Bit("mbs_2"),
 								::BitField("PTS[14..0]", 15),
 								::Bit("mbs_3"),
+								::Value("PTS", sub { ($_->ctx->{"PTS[32..30]"} << 30 |
+								                      $_->ctx->{"PTS[29..15]"} << 15 |
+								                      $_->ctx->{"PTS[14..0]"}  <<  0
+								                     ) / 90000. } ),
 							)),
 							::If( sub { $_->ctx->{"DTS present"} }, ::BitStruct("DTS",
 								# 5 bytes
@@ -94,12 +99,20 @@ sub hexdump ($) {
 								::Bit("mbs_2"),
 								::BitField("DTS[14..0]", 15),
 								::Bit("mbs_3"),
+								::Value("DTS", sub { ($_->ctx->{"DTS[32..30]"} << 30 |
+								                      $_->ctx->{"DTS[29..15]"} << 15 |
+								                      $_->ctx->{"DTS[14..0]"}  <<  0
+								                     ) / 90000. } ),
 							)),
 							::Bytes("padding", sub { $_->ctx->{"PES header data length"}
 							                         - ($_->ctx->{"PTS present"} ? 5 : 0)
 							                         - ($_->ctx->{"DTS present"} ? 5 : 0)
 							                       } ),
 						)->parse($self->{source});
+
+					if( $extensions->{"PTS present"} ) {
+						$self->{"last PTS"} = $extensions->{"PTS"}->{"PTS"};
+					}
 
 					my $substreamid = ::Byte("substream ID")->parse($self->{source});
 					$length -= $self->{source}->tell - $pos; # Remove extensions & substreamid
@@ -121,15 +134,15 @@ sub hexdump ($) {
 			} elsif( $self->{state} eq 'data' ) {
 				# Read the requested amounts of bytes, up to the amount available
 				# in this PES
-				my $avail = $self->{datalen} - $self->{pos};
 				my $toread = $count - length($buf);
-				if( $avail < $toread ) { $toread = $avail; }
+				if( $self->{datalen} < $toread ) { $toread = $self->{datalen}; }
 				printf STDERR "\@0x%x reading %d = 0x%x bytes\n", $self->{source}->tell, $toread, $toread if $self->{debug};
 				$buf .= ::Bytes("pes data", $toread )->parse( $self->{source} );
-				printf STDERR "\@0x%x read %d = 0x%x / %d = 0x%x bytes\n", $self->{source}->tell, length($buf), length($buf), $count, $count if $self->{debug};
+				$self->{datalen} -= $toread;
 				$self->{pos} += $toread;
+				printf STDERR "\@0x%x read %d = 0x%x / %d = 0x%x bytes\n", $self->{source}->tell, length($buf), length($buf), $count, $count if $self->{debug};
 
-				if( $self->{pos} == $self->{datalen} ) {
+				if( $self->{datalen} == 0 ) {
 					$self->{state} = 'init';
 				}
 
@@ -143,7 +156,7 @@ sub hexdump ($) {
 
 	sub next_pes {
 		my ($self) = @_;
-		my $newpos = $self->{source}->tell + ($self->{datalen} - $self->{pos});
+		my $newpos = $self->{source}->tell + $self->{datalen};
 		$self->{source}->seek($newpos);
 		$self->{state} = 'init';
 	}
@@ -160,7 +173,7 @@ sub hexdump ($) {
 
 	sub vtell {
 		my $self = shift;
-		return sprintf("PES\@0x%x parent\@0x%x", scalar($self->tell), $self->{source}->tell );
+		return sprintf("\@0x%x", $self->{source}->tell );
 	}
 
 	#sub seek {
@@ -215,5 +228,56 @@ while(1) {
 		}
 	}
 
-	printf "%s +0x%x SPU\n", $s_pesdata->vtell, $length;
+	printf "%s %f --> %f : ", $s_pesdata->vtell, $s_pesdata->{"last PTS"},
+	                          $s_pesdata->{"last PTS"} + ($duration<<10)/90000.;
+
+	while( length($control) ) {
+		my $cmd = ord( substr $control, 0, 1, '' );
+		if( $cmd == 0x00 ) {
+			printf "<force> ";
+
+		} elsif( $cmd == 0x01 ) {
+			printf "<start> ";
+
+		} elsif( $cmd == 0x02 ) {
+			printf "<stop> ";
+
+		} elsif( $cmd == 0x03 ) {
+			my $palette = substr $control, 0, 2, '';
+			my @palette = map { hex($_) } split //, unpack "H4", $palette;
+			printf "<palette %s> ", join(' ', @palette);
+
+		} elsif( $cmd == 0x04 ) {
+			my $palette = substr $control, 0, 2, '';
+			my @palette = map { hex($_) } split //, unpack "H4", $palette;
+			printf "<alpha %s> ", join(' ', @palette);
+
+		} elsif( $cmd == 0x05 ) {
+			my $coords = substr $control, 0, 6, '';
+			$coords = BitStruct("coords",
+					BitField("c1", 12),
+					BitField("cl", 12),
+					BitField("r1", 12),
+					BitField("rl", 12),
+				)->parse($coords);
+			printf "<coords c[%d;%d] r[%d;%d]> ", $coords->{c1}, $coords->{cl},
+			                                      $coords->{r1}, $coords->{rl};
+
+		} elsif( $cmd == 0x06 ) {
+			my $coords = substr $control, 0, 4, '';
+			$coords = Struct("coords",
+					UBInt16("1st"),
+					UBInt16("2nd"),
+				)->parse($coords);
+			printf "<pos %d %d> ", $coords->{"1st"}, $coords->{"2nd"};
+
+		} elsif( $cmd == 0xff ) {
+			printf "<end> ";
+
+		} else {
+			printf "<0x%02x ?", $cmd;
+			last;
+		}
+	}
+	print "\n";
 }
