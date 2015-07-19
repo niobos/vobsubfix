@@ -3,90 +3,82 @@
 use strict;
 use warnings;
 
-my $fh = *STDIN;
+if( @ARGV != 1 ) {
+	print STDERR "Usage: $0 vobsub.idx\n";
+	exit 64;
+}
 
-sub try_read {
-	my ($fh, $count, $incompleteok) = @_;
+
+if( $ARGV[0] !~ m/(.*)\.(idx|sub)$/ ) {
+	printf STDERR "`%s`: not an idx or sub extension, skipping\n", $ARGV[0];
+	next;
+}
+my $idxfilename = "$1.idx";
+my $subfilename = "$1.sub";
+
+open my $idx, "+<:encoding(utf8)", $idxfilename
+	or die "Couldn't read $idxfilename: $!\n";
+open my $sub, "+<:raw", $subfilename
+	or die "Couldn't read $subfilename: $!\n";
+
+my $idxpos = tell $idx;
+while(my $idxline = <$idx>) {
+	if( $idxline =~ m/^\s*#/ ) { # comment line
+		next;
+	} elsif( $idxline !~ m/^timestamp: ([^,]+), filepos: (.*)$/ ) {
+		# none interesting lines
+		next;
+	}
+	my ($timestamp, $subpos) = ($1, hex($2));
+
+	printf "timestamp: %s, filepos: %08x: ", $timestamp, $subpos;
+
+	seek $sub, $subpos, 0; # Go to this subtitle in the sub file
+	# Expect a Pack header
 	my $buf;
-	my $n = read $fh, $buf, $count;
-	if( $n < $count ) {
-		return undef if $incompleteok;
-		die(sprintf "\@0x%08x : Unexpected EOF", tell($fh));
+	read $sub, $buf, 4;
+	if( $buf ne "\x00\x00\x01\xba" ) {
+		die(sprintf("sub @ 0x%08x : Expected PES header of PACK\n", $subpos));
 	}
-	return $buf;
-}
-
-sub hexdump ($) {
-	return join(' ', map { sprintf "%02x", ord($_) } split //, $_[0]);
-}
-
-
-my $spu_data_remaining = 0;
-while(1) {
-	my $sync = try_read($fh, 3, 1);
-	last if ! defined $sync;
-	if( $sync ne "\x00\x00\x01" ) {
-		die(sprintf "\@0x%08x : Expected PES header, but got %s", tell($fh)-3, hexdump($sync));
+	seek $sub, 10, 1; # seek over the data
+	read $sub, $buf, 4;
+	if( $buf ne "\x00\x00\x01\xbd" ) {
+		die(sprintf("sub @ 0x%08x : Expected PES header of private\n", $subpos+14));
 	}
 
-	my $streamid = try_read($fh, 1);
-	$streamid = unpack "C", $streamid;
+	read $sub, my $peslength, 2; $peslength = unpack "n", $peslength;
+	seek $sub, 2, 1; # seek first 2 bytes of extensions
+	read $sub, my $pes_header_extra_len, 1; $pes_header_extra_len = unpack "C", $pes_header_extra_len;
+	seek $sub, $pes_header_extra_len, 1; # Seek to end of header
 
-	if( $streamid == 0xba ) {
-		# Pack header, copy over
-		my $data = try_read($fh, 10);
-		print pack "a*Ca*", $sync, $streamid, $data;
-		printf STDERR "\@0x%08x : Pack, copy\n", tell($fh);
-
-	} elsif( $streamid == 0xbe ) {
-		# padding, copy over
-		my $length = try_read($fh, 2);
-		$length = unpack("n", $length);
-		my $data = try_read($fh, $length);
-		print pack "a*Cna*", $sync, $streamid, $length, $data;
-		printf STDERR "\@0x%08x : padding, copy\n", tell($fh);
-
-	} elsif( $streamid == 0xbd ) {
-		# private data, inspect
-		my $length = try_read($fh, 2);
-		$length = unpack("n", $length);
-		my $length_remaining = $length;
-
-		my $extensions = try_read($fh, 3); $length_remaining -= 3;
-		my $ext_h_len = unpack "xxC", $extensions;
-		$extensions .= try_read($fh, $ext_h_len); $length_remaining -= $ext_h_len;
-
-		my $substreamid = unpack "C", try_read($fh, 1); $length_remaining -= 1;
-		warn(sprintf "\@0x%08x : substream 0x%02x instead of expected 0x20", tell($fh)-1, $substreamid) if $substreamid != 0x20;
-
-		if( $spu_data_remaining > 0 ) {
-			# We are already inside a SPU, copy over
-			my $toread = $spu_data_remaining;
-			$toread = $length_remaining if $length_remaining < $toread;
-			my $data = try_read($fh, $toread);
-			print pack "a*Cna*Ca*", $sync, $streamid, $length, $extensions, $substreamid, $data;
-			printf STDERR "\@0x%08x : SPU-cont, copy 0x%04x (%d) bytes\n", tell($fh), $toread, $toread;
-			$spu_data_remaining -= $toread;
-
-		} else {
-			# Start of an SPU, inspect
-			my $spu_len = unpack "n", try_read($fh, 2); $length_remaining -= 2;
-			my $remaining_pes_data = try_read($fh, $length_remaining);
-
-			if( $spu_len == 0 && $length_remaining == 0 ) {
-				# empty SPU, switch streamid to padding
-				$streamid = 0xbe;
-				print pack "a*Cna*Cn", $sync, $streamid, $length, $extensions, $substreamid, $spu_len; # $remaining_pes_data is empty
-				printf STDERR "\@0x%08x : 0-length SPU, change to padding\n", tell($fh);
-			} else {
-				warn(sprintf "\@0x%08x : 0-length SPU with %d bytes trailing data", tell($fh), $length_remaining) if $spu_len == 0;
-				print pack "a*Cna*Cna*", $sync, $streamid, $length, $extensions, $substreamid, $spu_len, $remaining_pes_data;
-				printf STDERR "\@0x%08x : 0x%04x (%d) length SPU, copy 0x%04x (%d) bytes\n", tell($fh), $spu_len, $spu_len, $length_remaining, $length_remaining;
-				$spu_data_remaining = $spu_len - 2 - $length_remaining;
-			}
-		}
-
-	} else {
-		die(sprintf "\@0x%08x : Unknown stream id 0x%02x", tell($fh)-1, $streamid);
+	read $sub, my $substreamid, 1; $substreamid = unpack "C", $substreamid;
+	if( $substreamid != 0x20 ) {
+		die(sprintf("sub @ 0x%08x : Expected substreamID 0x20\n", tell($sub)-1));
 	}
+
+	read $sub, my $spulen, 2; $spulen = unpack "n", $spulen;
+	printf "SPU length %d", $spulen;
+
+	if( $spulen == 0 ) {
+		printf " removing";
+
+		# Change streamID to padding (0xbe) in the .sub
+		seek $sub, $subpos+14+3, 0;
+		print $sub "\xbe";
+
+		# Comment out this line in the .idx
+		my $curpos = tell $idx; # remember where we are
+		seek $idx, $idxpos, 0; # go to the beginning of this line
+		print $idx "#"; # overwrite the first char with a '#'
+		seek $idx, $curpos, 0; # return to where we were
+	}
+
+	printf "\n";
+
+} continue {
+	# update $idxpos to be the beginning of line
+	$idxpos = tell $idx;
 }
+
+close $idx;
+close $sub;
