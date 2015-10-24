@@ -15,7 +15,8 @@ previous image, and thus looked interlaced.
 
 This project is my quest to figure out what caused it, and to fix it. But since
 I don't have any Delphi experience, I can't fix SubRip itself, so I made a
-patch-script to fix it externally.
+patch-script to fix it externally. Make sure that you configure SubRip to NOT
+"Use IDX's file offsets" (in Options -> Global Options).
 
 [SubRip]: http://subrip.sourceforge.net/
 [MP4Box]: https://gpac.wp.mines-telecom.fr/mp4box/
